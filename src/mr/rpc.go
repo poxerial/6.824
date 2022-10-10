@@ -6,8 +6,10 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
-import "strconv"
+import (
+	"os"
+	"strconv"
+)
 
 //
 // example to show how to declare the arguments
@@ -22,8 +24,30 @@ type ExampleReply struct {
 	Y int
 }
 
-// Add your RPC definitions here.
+const (
+	Request      = 1
+	MapFinish    = 2
+	ReduceFinish = 3
+	Fail         = 4
+	IsMap        = 5
+	IsReduce     = 6
+	Exit         = 7
+	Wait         = 8
+)
 
+// Add your RPC definitions here.
+type Args struct {
+	Wid         int
+	RequestType int
+	MapResult   string
+}
+
+type Reply struct {
+	Wid      int
+	TaskType int
+	NReduce  int
+	Task     string
+}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
