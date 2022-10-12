@@ -51,6 +51,8 @@ func Worker(mapf func(string, string) []KeyValue,
 				file, err := os.Open(filename)
 				if err != nil {
 					log.Fatalf("cannot open %v", filename)
+					args = Args{reply.Wid, Fail, ""}
+					continue
 				}
 				content, err := ioutil.ReadAll(file)
 				if err != nil {
@@ -118,7 +120,7 @@ func Worker(mapf func(string, string) []KeyValue,
 					file, err := os.Open(filename)
 					if err != nil {
 						fmt.Println("Can't open file", filename)
-						continue
+						os.Exit(-1)
 					}
 					files = append(files, file)
 					dec = append(dec, json.NewDecoder(file))
@@ -168,9 +170,9 @@ func Worker(mapf func(string, string) []KeyValue,
 			} else if reply.TaskType == Exit {
 				os.Exit(0)
 			} else if reply.TaskType == Fail {
-				args = Args{}
+				time.Sleep(time.Millisecond * 10)
 			} else if reply.TaskType == Wait {
-				args = Args{}
+				args = Args{-1, Request, ""}
 				time.Sleep(time.Second)
 			} else {
 				log.Fatal("Invalid reply.TaskType:", reply.TaskType)

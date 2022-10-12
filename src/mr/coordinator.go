@@ -176,7 +176,9 @@ func (c *Coordinator) server() {
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
+	// for i := 0; i < runtime.NumCPU(); i++ {
 	go http.Serve(l, nil)
+	// }
 }
 
 // main/mrcoordinator.go calls Done() periodically to find out
