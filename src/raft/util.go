@@ -21,6 +21,7 @@ const (
 	TickerInfo
 	UserInfo
 	ApplyInfo
+	PersistInfo
 )
 
 //	var loggersList = []string{
@@ -45,9 +46,12 @@ func init() {
 
 		loggers[RPCInfo] = log.New(tmpIO, "[RPCInfo]", log.LstdFlags)
 		loggers[LeaderInfo] = log.New(tmpIO, "[LeaderInfo]", log.LstdFlags)
+		//loggers[CandidateInfo] = log.New(tmpIO, "[CandidateInfo]", log.LstdFlags)
+		//loggers[TickerInfo] = log.New(tmpIO, "[TickerInfo]", log.LstdFlags)
 		loggers[FollowerInfo] = log.New(tmpIO, "[FollowerInfo]", log.LstdFlags)
 		loggers[UserInfo] = log.New(tmpIO, "[UserInfo]", log.LstdFlags)
 		loggers[ApplyInfo] = log.New(tmpIO, "[ApplyInfo]", log.LstdFlags)
+		//loggers[PersistInfo] = log.New(tmpIO, "[PersistInfo]", log.LstdFlags)
 
 		runtime.SetFinalizer(loggers[0], func(logger *log.Logger) {
 			err := tmpIO.Close()
