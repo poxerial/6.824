@@ -33,9 +33,9 @@ const (
 	voteSuccessRatio    = 0.5
 	EntryCommitRatio    = 0.5
 	maxTickerMs         = 300
-	tickerSleepMs       = 150
-	maxVoteMs           = 300
-	minVoteMs           = 0
+	tickerSleepMs       = 100
+	maxVoteMs           = 250
+	minVoteMs           = 100
 	voteCallSleepMs     = 20
 	heartBeatMs         = 100
 	RPCTimeOutMs        = 50
@@ -367,6 +367,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			psChanged = true
 		}
 	}
+	reply.Term = rf.ps.currentTerm
 
 	var lastTerm, lastIndex int
 	if len(rf.ps.logEntries) == 0 {
@@ -623,10 +624,9 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) vote(tickerSleepDuration time.Duration) {
+func (rf *Raft) vote(voteMaxTime time.Duration) {
 
 	rf.mu.Lock()
-
 	rf.lastTime = time.Now()
 	rf.status = Candidate
 	rf.ps.currentTerm++
@@ -646,7 +646,7 @@ func (rf *Raft) vote(tickerSleepDuration time.Duration) {
 
 	rf.persist()
 
-	DLog(CandidateInfo, me, "start vote, time duration:", tickerSleepDuration)
+	DLog(CandidateInfo, me, "start vote, time duration:", voteMaxTime)
 
 	var voteGrantedNum atomic.Int32
 	voteGrantedNum.Store(1)
@@ -678,10 +678,10 @@ func (rf *Raft) vote(tickerSleepDuration time.Duration) {
 		}
 	}
 
-	for !voteFail.Load() && time.Now().Sub(lastTime) < tickerSleepDuration {
+	for !voteFail.Load() && time.Now().Sub(lastTime) < voteMaxTime {
 		rf.mu.Lock()
 		if float32(voteGrantedNum.Load())/float32(totalNum) >= voteSuccessRatio && rf.status == Candidate {
-			terminate := time.Now().Sub(rf.lastTime) > tickerSleepDuration
+			terminate := time.Now().Sub(rf.lastTime) > voteMaxTime
 			if !terminate {
 				rf.initializeLeader()
 				rf.mu.Unlock()
@@ -697,8 +697,16 @@ func (rf *Raft) vote(tickerSleepDuration time.Duration) {
 	DLog(CandidateInfo, rf.me, "election failed,", "callNum:", callNum.Load(), "voteGrantedNum:", voteGrantedNum.Load(),
 		"voteFail:", voteFail.Load(), "total:", totalNum)
 	rf.status = Follower
-	rf.lastTime = time.Now()
+	now := time.Now()
+	diff := now.Sub(rf.lastTime)
+	var sleepMs int64
+	if voteMaxTime.Milliseconds() > diff.Milliseconds() {
+		sleepMs = voteMaxTime.Milliseconds() - diff.Milliseconds()
+	}
 	rf.mu.Unlock()
+	if sleepMs > 0 {
+		time.Sleep(time.Duration(sleepMs) * time.Millisecond)
+	}
 }
 
 // need additional lock
@@ -814,9 +822,11 @@ func (rf *Raft) setAppendEntries(i int, leaderID int) {
 			} else if prevLogIndex > rf.ps.lastIndex {
 				prevLogTerm = rf.ps.logEntries[prevLogIndex-rf.ps.lastIndex-1].Term
 			} else {
+				rf.mu.RUnlock()
+				rf.mu.Lock()
 				rf.leaderStat.nextIndex[server] = rf.ps.lastIndex + 1
 				rf.leaderStat.matchIndex[server] = rf.ps.lastIndex
-				rf.mu.RUnlock()
+				rf.mu.Unlock()
 				rf.sendInstallSnapshot(server)
 				continue
 			}
@@ -953,15 +963,17 @@ func (rf *Raft) ticker() {
 		// time.Sleep().
 		rf.mu.Lock()
 		lastTime := rf.lastTime
-		DLog(TickerInfo, rf.me, "ticks with last time:", lastTime)
 		status := rf.status
 		rf.mu.Unlock()
+		DLog(TickerInfo, rf.me, "ticks with last time:", lastTime)
 
 		if time.Now().Sub(lastTime) > maxTickerMs*time.Millisecond && status == Follower {
 			r := rand.Intn(maxVoteMs - minVoteMs)
 			sleepTime := time.Duration(r+minVoteMs) * time.Millisecond
-			go rf.vote(sleepTime)
-			time.Sleep(sleepTime)
+			rf.vote(sleepTime)
+			rf.mu.Lock()
+			rf.lastTime = time.Now()
+			rf.mu.Unlock()
 		} else {
 			time.Sleep(tickerSleepMs * time.Millisecond)
 		}
@@ -990,7 +1002,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.lastTime = time.Now()
-	rf.ps.currentTerm = -1
+	rf.ps.currentTerm = 0
 	rf.ps.logEntries = append(rf.ps.logEntries, Entry{})
 	rf.ps.lastIndex = -1
 

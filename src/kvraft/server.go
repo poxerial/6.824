@@ -7,6 +7,8 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
+	"unsafe"
 )
 
 const Debug = false
@@ -18,15 +20,28 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+const (
+	commitHandleSleepMs = 10
+	sendRPCSleepMs      = 10
+)
+
+const (
+	OpGet = iota
+	OpPut
+	OpAppend
+)
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	OpType int
+	Key    string
+	Value  string
 }
 
 type KVServer struct {
-	mu      sync.Mutex
+	mu      raft.DLock
 	me      int
 	rf      *raft.Raft
 	applyCh chan raft.ApplyMsg
@@ -35,18 +50,158 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+
+	// initialized with sync.Mutex
+	// also used to ensure the sequential consistency
+	// between requestQueue and applyCh
+	cond *sync.Cond
+	// condition variable
+	requestOp *Op
+	// if false, requestResult is error message instead of result
+	requestSuccess bool
+	requestResult  string
+
+	requestQueue []*Op
+	db           map[string]string
 }
 
+func (kv *KVServer) startOp(op Op) (requestSuccess bool, requestResult string) {
+	kv.cond.L.Lock()
+	_, _, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		kv.cond.L.Unlock()
+		requestSuccess = false
+		requestResult = ErrWrongLeader
+		return
+	}
+	kv.requestQueue = append(kv.requestQueue, &op)
+	for kv.requestOp != &op {
+		raft.DLog(raft.CondInfo, kv.me, unsafe.Pointer(&op), "start waiting.")
+		kv.cond.Wait()
+		raft.DLog(raft.CondInfo, kv.me, unsafe.Pointer(&op), "receive broadcast with &op", unsafe.Pointer(kv.requestOp))
+	}
+	raft.DLog(raft.CondInfo, kv.me, unsafe.Pointer(&op), "awakes.")
+	requestSuccess = kv.requestSuccess
+	requestResult = kv.requestResult
+	kv.cond.L.Unlock()
+	return
+}
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	raft.DLog(raft.ServerInfo, kv.me, "receives Get", args)
+	defer raft.DLog(raft.ServerInfo, kv.me, "finishes Get", args, "and reply", reply)
+
+	op := Op{}
+	op.OpType = OpGet
+	op.Key = args.Key
+
+	requestSuccess, requestResult := kv.startOp(op)
+
+	if !requestSuccess {
+		reply.Err = requestResult
+		return
+	}
+	reply.Err = OK
+	reply.Value = requestResult
+	return
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	raft.DLog(raft.ServerInfo, kv.me, "receives PutAppend", args)
+	defer raft.DLog(raft.ServerInfo, kv.me, "reply PutAppend", reply)
+
+	op := Op{}
+	if args.Op == "Put" {
+		op.OpType = OpPut
+	} else {
+		op.OpType = OpAppend
+	}
+	op.Key = args.Key
+	op.Value = args.Value
+
+	requestSuccess, requestResult := kv.startOp(op)
+
+	if !requestSuccess {
+		reply.Err = requestResult
+		return
+	}
+	reply.Err = OK
+	return
 }
 
-//
+func (kv *KVServer) apply(op Op) (success bool, result string) {
+	if op.OpType == OpAppend {
+		_, ok := kv.db[op.Key]
+		if !ok {
+			result = string(ErrNoKey)
+			return
+		}
+		kv.db[op.Key] = kv.db[op.Key] + op.Value
+	} else if op.OpType == OpPut {
+		kv.db[op.Key] = op.Value
+	} else {
+		raft.Assert(op.OpType == OpGet, "op.OpType must be OpPut OpAppend OpGet.")
+		val, ok := kv.db[op.Key]
+		if !ok {
+			result = string(ErrNoKey)
+			return
+		}
+		result = val
+	}
+	success = true
+	return
+}
+
+func (kv *KVServer) handleCommit() {
+	for !kv.killed() {
+		select {
+		case msg := <-kv.applyCh:
+
+			committed, ok := msg.Command.(Op)
+			raft.Assert(ok, "command field of msg in applyCh must be type Op.")
+			success, result := kv.apply(committed)
+
+			kv.cond.L.Lock()
+			var op *Op
+			empty := len(kv.requestQueue) == 0
+			if !empty {
+				op = kv.requestQueue[0]
+			}
+			if empty {
+				continue
+			} else if *op != committed {
+				for i := range kv.requestQueue {
+					if kv.requestQueue[i] == op {
+						for j := 0; j < i; j++ {
+							kv.requestSuccess = false
+							kv.requestResult = ErrApplyFailed
+							kv.requestOp = kv.requestQueue[j]
+							kv.cond.Broadcast()
+						}
+						kv.requestQueue = kv.requestQueue[i+1:]
+						kv.requestSuccess = success
+						kv.requestResult = result
+						kv.requestOp = op
+						raft.DLog(raft.CondInfo, kv.me, "send broadcast", unsafe.Pointer(kv.requestOp))
+						kv.cond.Broadcast()
+					}
+				}
+			} else {
+				kv.requestQueue = kv.requestQueue[1:]
+				kv.requestSuccess = success
+				kv.requestResult = result
+				kv.requestOp = op
+				raft.DLog(raft.CondInfo, kv.me, "send broadcast", unsafe.Pointer(kv.requestOp))
+				kv.cond.Broadcast()
+			}
+			kv.cond.L.Unlock()
+		default:
+			time.Sleep(commitHandleSleepMs * time.Millisecond)
+		}
+	}
+}
+
 // the tester calls Kill() when a KVServer instance won't
 // be needed again. for your convenience, we supply
 // code to set rf.dead (without needing a lock),
@@ -55,7 +210,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 // code to Kill(). you're not required to do anything
 // about this, but it may be convenient (for example)
 // to suppress debug output from a Kill()ed instance.
-//
 func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
@@ -67,7 +221,6 @@ func (kv *KVServer) killed() bool {
 	return z == 1
 }
 
-//
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
 // form the fault-tolerant key/value service.
@@ -80,7 +233,6 @@ func (kv *KVServer) killed() bool {
 // you don't need to snapshot.
 // StartKVServer() must return quickly, so it should start goroutines
 // for any long-running work.
-//
 func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
@@ -96,6 +248,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	mu := sync.Mutex{}
+	kv.cond = sync.NewCond(&mu)
+	kv.db = make(map[string]string)
+
+	go kv.handleCommit()
 
 	return kv
 }
