@@ -1,17 +1,25 @@
 package kvraft
 
 import (
+	"crypto/rand"
+	"math/big"
+	"sync"
+	"sync/atomic"
+	"time"
+
 	"6.824/labrpc"
 	"6.824/raft"
-	"sync/atomic"
 )
-import "crypto/rand"
-import "math/big"
+
+var clerkNum = 0
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	mu              sync.Mutex
 	lastLeaderIndex atomic.Int32
+	commandID       int
+	ID              int
 }
 
 func nrand() int64 {
@@ -22,19 +30,26 @@ func nrand() int64 {
 }
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
+
 	ck := new(Clerk)
 	ck.servers = servers
-	// You'll have to add code here.
+	// You'll have to add code here
+	ck.ID = clerkNum
+	clerkNum++
 	return ck
 }
 
 func (ck *Clerk) sendRPC(method string, args interface{}, reply interface{}) bool {
-	raft.DLog(raft.RPCInfo, "clerk starts to send", method, "args", args)
-	defer raft.DLog(raft.RPCInfo, "clerk finish", method, "args", args, "reply", reply)
-
 	leaderIndex := ck.lastLeaderIndex.Load()
 
-	return ck.servers[leaderIndex].Call(method, args, reply)
+	raft.DLog(raft.RPCInfo, "clerk starts to send", method, "to leader", leaderIndex, "args:", args)
+	startTime := time.Now()
+
+	ret := ck.servers[leaderIndex].Call(method, args, reply)
+	duration := time.Now().Sub(startTime)
+	raft.DLog(raft.RPCInfo, "clerk finish", method, "duration:", duration, "args", args, "reply", reply)
+	return ret
+
 }
 
 // fetch the current value for a key.
@@ -52,11 +67,22 @@ func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
 	args := GetArgs{}
 	args.Key = key
+	args.Clerk = ck.ID
+
+	ck.mu.Lock()
+	args.ID = ck.commandID
+	ck.commandID++
+	ck.mu.Unlock()
+
 	reply := GetReply{}
 
 	success := ck.sendRPC("KVServer.Get", &args, &reply)
-	for success && reply.Err == ErrWrongLeader {
-		ck.lastLeaderIndex.Store(int32(nrand() % int64(len(ck.servers))))
+	for (!success || reply.Err != OK) && reply.Err != ErrNoKey {
+		time.Sleep(sendRPCSleepMs * time.Millisecond)
+		if reply.Err == ErrWrongLeader {
+			ck.lastLeaderIndex.Store(int32(nrand() % int64(len(ck.servers))))
+		}
+		reply = GetReply{}
 		success = ck.sendRPC("KVServer.Get", &args, &reply)
 	}
 

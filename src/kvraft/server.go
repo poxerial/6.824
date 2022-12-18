@@ -1,14 +1,15 @@
 package kvraft
 
 import (
-	"6.824/labgob"
-	"6.824/labrpc"
-	"6.824/raft"
 	"log"
 	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
+
+	"6.824/labgob"
+	"6.824/labrpc"
+	"6.824/raft"
 )
 
 const Debug = false
@@ -22,7 +23,7 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 
 const (
 	commitHandleSleepMs = 10
-	sendRPCSleepMs      = 10
+	sendRPCSleepMs      = 50
 )
 
 const (
@@ -61,13 +62,14 @@ type KVServer struct {
 	requestSuccess bool
 	requestResult  string
 
-	requestQueue []*Op
-	db           map[string]string
+	requestQueue      []*Op
+	db                map[string]string
+	clerk_m_commandID map[int]int
 }
 
 func (kv *KVServer) startOp(op Op) (requestSuccess bool, requestResult string) {
-	kv.cond.L.Lock()
 	_, _, isLeader := kv.rf.Start(op)
+	kv.cond.L.Lock()
 	if !isLeader {
 		kv.cond.L.Unlock()
 		requestSuccess = false
@@ -104,7 +106,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 	reply.Err = OK
 	reply.Value = requestResult
-	return
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -127,15 +128,15 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 	reply.Err = OK
-	return
 }
 
 func (kv *KVServer) apply(op Op) (success bool, result string) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
 	if op.OpType == OpAppend {
 		_, ok := kv.db[op.Key]
 		if !ok {
-			result = string(ErrNoKey)
-			return
+			kv.db[op.Key] = ""
 		}
 		kv.db[op.Key] = kv.db[op.Key] + op.Value
 	} else if op.OpType == OpPut {
@@ -154,10 +155,17 @@ func (kv *KVServer) apply(op Op) (success bool, result string) {
 }
 
 func (kv *KVServer) handleCommit() {
-	for !kv.killed() {
+	kill := make(chan bool)
+	go func() {
+		for !kv.killed() {
+			time.Sleep(time.Millisecond * 100)
+		}
+		kill <- true
+	} ()
+	for {
 		select {
 		case msg := <-kv.applyCh:
-
+			go func() {
 			committed, ok := msg.Command.(Op)
 			raft.Assert(ok, "command field of msg in applyCh must be type Op.")
 			success, result := kv.apply(committed)
@@ -169,9 +177,10 @@ func (kv *KVServer) handleCommit() {
 				op = kv.requestQueue[0]
 			}
 			if empty {
-				continue
+				kv.cond.L.Unlock()
+				return 
 			} else if *op != committed {
-				for i := range kv.requestQueue {
+				for i := 1; i < len(kv.requestQueue); i++ {
 					if kv.requestQueue[i] == op {
 						for j := 0; j < i; j++ {
 							kv.requestSuccess = false
@@ -196,8 +205,9 @@ func (kv *KVServer) handleCommit() {
 				kv.cond.Broadcast()
 			}
 			kv.cond.L.Unlock()
-		default:
-			time.Sleep(commitHandleSleepMs * time.Millisecond)
+		} ()
+		case <-kill:
+			return
 		}
 	}
 }
