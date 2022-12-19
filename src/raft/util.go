@@ -25,6 +25,7 @@ const (
 	SnapshotInfo
 	ServerInfo
 	CondInfo
+	TestInfo
 )
 
 //	var loggersList = []string{
@@ -47,17 +48,20 @@ func init() {
 
 		loggers = make(map[int]*log.Logger)
 
-		loggers[RPCInfo] = log.New(tmpIO, "[RPCInfo]", log.LstdFlags)
-		//loggers[LeaderInfo] = log.New(tmpIO, "[LeaderInfo]", log.LstdFlags)
-		//loggers[CandidateInfo] = log.New(tmpIO, "[CandidateInfo]", log.LstdFlags)
-		//loggers[TickerInfo] = log.New(tmpIO, "[TickerInfo]", log.LstdFlags)
-		//loggers[FollowerInfo] = log.New(tmpIO, "[FollowerInfo]", log.LstdFlags)
-		loggers[UserInfo] = log.New(tmpIO, "[UserInfo]", log.LstdFlags)
-		//loggers[ApplyInfo] = log.New(tmpIO, "[ApplyInfo]", log.LstdFlags)
-		//loggers[PersistInfo] = log.New(tmpIO, "[PersistInfo]", log.LstdFlags)
-		//loggers[SnapshotInfo] = log.New(tmpIO, "[SnapshotInfo]", log.LstdFlags)
-		loggers[ServerInfo] = log.New(tmpIO, "[ServerInfo]", log.LstdFlags)
-		loggers[CondInfo] = log.New(tmpIO, "[CondInfo]", log.LstdFlags)
+		flags := log.Lmicroseconds
+
+		loggers[RPCInfo] = log.New(tmpIO, "[RPCInfo]", flags)
+		loggers[LeaderInfo] = log.New(tmpIO, "[LeaderInfo]", flags)
+		loggers[CandidateInfo] = log.New(tmpIO, "[CandidateInfo]", flags)
+		//loggers[TickerInfo] = log.New(tmpIO, "[TickerInfo]", flags)
+		loggers[FollowerInfo] = log.New(tmpIO, "[FollowerInfo]", flags)
+		loggers[UserInfo] = log.New(tmpIO, "[UserInfo]", flags)
+		loggers[ApplyInfo] = log.New(tmpIO, "[ApplyInfo]", flags)
+		loggers[PersistInfo] = log.New(tmpIO, "[PersistInfo]", flags)
+		loggers[SnapshotInfo] = log.New(tmpIO, "[SnapshotInfo]", flags)
+		loggers[ServerInfo] = log.New(tmpIO, "[ServerInfo]", flags)
+		loggers[CondInfo] = log.New(tmpIO, "[CondInfo]", flags)
+		loggers[TestInfo] = log.New(tmpIO, "[TestInfo]", flags)
 
 		runtime.SetFinalizer(loggers[0], func(logger *log.Logger) {
 			err := tmpIO.Close()
@@ -96,7 +100,7 @@ type DLock struct {
 	init  bool
 }
 
-func goid() int {
+func GoID() int {
 	var buf [64]byte
 	n := runtime.Stack(buf[:], false)
 	idField := strings.Fields(strings.TrimPrefix(string(buf[:n]), "goroutine "))[0]
@@ -109,7 +113,7 @@ func goid() int {
 
 func (l *DLock) Lock() {
 	l.lock.Lock()
-	l.goid = goid()
+	l.goid = GoID()
 }
 
 func (l *DLock) Unlock() {
@@ -124,13 +128,13 @@ func (l *DLock) RLock() {
 		l.Rgoid = make(map[int]bool)
 		l.init = true
 	}
-	l.Rgoid[goid()] = true
+	l.Rgoid[GoID()] = true
 	l.mu.Unlock()
 }
 
 func (l *DLock) RUnlock() {
 	l.mu.Lock()
-	l.Rgoid[goid()] = false
+	l.Rgoid[GoID()] = false
 	l.mu.Unlock()
 	l.lock.RUnlock()
 }
