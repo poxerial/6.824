@@ -5,7 +5,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 
 	"6.824/labgob"
 	"6.824/labrpc"
@@ -22,12 +21,15 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 }
 
 const (
-	commitHandleSleepMs = 10
-	sendRPCSleepMs      = 50
+	commitHandleSleepMs  = 10
+	electionMs           = 50
+	OpTimeOutMs          = 100
+	unsuccessfulMaxTimes = 3
 )
 
 const (
-	OpGet = iota
+	OpEmpty = iota
+	OpGet
 	OpPut
 	OpAppend
 )
@@ -36,9 +38,12 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	OpType int
-	Key    string
-	Value  string
+	OpType    int
+	Key       string
+	Value     string
+	ClerkID   int
+	CommandID int
+	Term      int
 }
 
 type KVServer struct {
@@ -56,61 +61,206 @@ type KVServer struct {
 	// also used to ensure the sequential consistency
 	// between requestQueue and applyCh
 	cond *sync.Cond
-	// condition variable
-	requestOp *Op
+	// if set to true, handleLeaderTransit() is trying to kill all waiting request
+	leaderTransit bool
+	term          int
+	requestOp     Op
 	// if false, requestResult is error message instead of result
 	requestSuccess bool
 	requestResult  string
+	requestCh      chan request
+	requestApplyCh chan bool
 
-	requestQueue      []*Op
-	db                map[string]string
-	clerk_m_commandID map[int]int
+	db              map[string]string
+	clerkMCommandID map[int]int
 }
 
-func (kv *KVServer) startOp(op Op) (requestSuccess bool, requestResult string) {
-	_, _, isLeader := kv.rf.Start(op)
-	kv.cond.L.Lock()
-	if !isLeader {
-		kv.cond.L.Unlock()
-		requestSuccess = false
-		requestResult = ErrWrongLeader
-		return
-	}
-	kv.requestQueue = append(kv.requestQueue, &op)
-	for kv.requestOp != &op {
-		raft.DLog(raft.CondInfo, kv.me, unsafe.Pointer(&op), "start waiting.")
-		kv.cond.Wait()
-		raft.DLog(raft.CondInfo, kv.me, unsafe.Pointer(&op), "receive broadcast with &op", unsafe.Pointer(kv.requestOp))
-	}
-	raft.DLog(raft.CondInfo, kv.me, unsafe.Pointer(&op), "awakes.")
-	requestSuccess = kv.requestSuccess
-	requestResult = kv.requestResult
-	kv.cond.L.Unlock()
-	return
+type request struct {
+	ch chan result
+	op Op
 }
+
+type result struct {
+	val     string
+	success bool
+}
+
+func (kv *KVServer) handleRequest() {
+	raft.DLog(raft.ServerInfo, kv.me, "handleRequest, GoID", raft.GoID())
+
+	kill := make(chan bool)
+	go func() {
+		for !kv.killed() {
+			time.Sleep(raft.HeartBeatMs * time.Millisecond)
+		}
+		kill <- true
+	}()
+
+	for {
+		select {
+		case req := <-kv.requestCh:
+			term, isLeader := kv.rf.GetState()
+
+			kv.cond.L.Lock()
+			if !isLeader || term != kv.term || req.op.Term != term {
+				kv.cond.L.Unlock()
+				result := result{
+					val:     ErrWrongLeader,
+					success: false,
+				}
+				req.ch <- result
+				continue
+			} else if req.op.CommandID == -1 {
+				kv.cond.L.Unlock()
+				result := result{
+					val:     ErrReGet,
+					success: false,
+				}
+				req.ch <- result
+				continue
+			}
+
+			kv.requestOp = req.op
+			raft.DLog(raft.ServerInfo, kv.me, "push", req.op)
+
+			kv.rf.Start(req.op)
+
+			// wait for apply
+			kv.cond.Wait()
+
+			kv.requestOp = Op{}
+			raft.DLog(raft.ServerInfo, kv.me, "pull", req.op)
+
+			kv.cond.L.Unlock()
+
+			result := result{
+				val:     kv.requestResult,
+				success: kv.requestSuccess,
+			}
+			req.ch <- result
+		case <-kill:
+			return
+		}
+	}
+}
+
+//func (kv *KVServer) startOp(op Op) (requestSuccess bool, requestResult string) {
+//	if op.CommandID == -1 {
+//		// ck.findOutLeader()
+//		return
+//	}
+//	kv.cond.L.Lock()
+//	for kv.requestOp.OpType != OpEmpty || kv.leaderTransit {
+//		raft.DLog(raft.CondInfo, kv.me, op, "start to wait.")
+//		kv.cond.Wait()
+//	}
+//	raft.DLog(raft.CondInfo, kv.me, op, "awakes.")
+
+//term, isLeader := kv.rf.GetState()
+//termChanged := term != kv.term
+//if termChanged {
+//	for termChanged {
+//		kv.cond.Wait()
+//		term, _ = kv.rf.GetState()
+//		termChanged = term != kv.term
+//	}
+//}
+
+//finishCh := make(chan bool, 1)
+//go func() {
+//	kv.requestOp = op
+//	raft.DLog(raft.ServerInfo, kv.me, op, "waiting for committed.")
+//	kv.cond.Wait()
+//	requestSuccess = kv.requestSuccess
+//	requestResult = kv.requestResult
+//	raft.DLog(raft.ServerInfo, kv.me, "requestOp became empty from", op)
+//	kv.requestOp = Op{}
+//	kv.cond.L.Unlock()
+//	kv.cond.Broadcast()
+//	finishCh <- true
+//}()
+
+//_, term, isLeader = kv.rf.Start(op)
+
+//if !isLeader || term != kv.term {
+//	requestSuccess = false
+//	requestResult = ErrWrongLeader
+//	kv.requestOp = Op{}
+//	kv.cond.L.Unlock()
+//	kv.cond.Broadcast()
+//	return
+//}
+
+//timeOutCh := make(chan bool, 1)
+//go func() {
+//	time.Sleep(OpTimeOutMs * time.Millisecond)
+//	timeOutCh <- true
+//}()
+
+//	select {
+//	case <-finishCh:
+//		return
+//	case <-timeOutCh:
+//		_, isLeader := kv.rf.GetState()
+//		if isLeader {
+//			raft.DLog(raft.ServerInfo, op, "timed out.")
+//			return false, ErrTimeOut
+//		} else {
+//			kv.cond.L.Lock()
+//			kv.requestOp = Op{}
+//			kv.cond.L.Unlock()
+//			kv.cond.Broadcast()
+//			return false, ErrWrongLeader
+//		}
+//	}
+//}
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	raft.DLog(raft.ServerInfo, kv.me, "receives Get", args)
+	raft.DLog(raft.ServerInfo, kv.me, "GoID:", raft.GoID(), "receives Get", args)
 	defer raft.DLog(raft.ServerInfo, kv.me, "finishes Get", args, "and reply", reply)
+
+	term, isLeader := kv.rf.GetState()
+	reply.Term = term
+	if !isLeader {
+		reply.Err = Err(ErrWrongLeader)
+		return
+	}
 
 	op := Op{}
 	op.OpType = OpGet
 	op.Key = args.Key
+	op.CommandID = args.CommandID
+	op.ClerkID = args.ClerkID
+	op.Term = term
 
-	requestSuccess, requestResult := kv.startOp(op)
+	resultCh := make(chan result)
+	request := request{
+		op: op,
+		ch: resultCh,
+	}
+	kv.requestCh <- request
 
-	if !requestSuccess {
-		reply.Err = requestResult
+	result := <-resultCh
+
+	if !result.success {
+		reply.Err = Err(result.val)
 		return
 	}
 	reply.Err = OK
-	reply.Value = requestResult
+	reply.Value = result.val
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	raft.DLog(raft.ServerInfo, kv.me, "receives PutAppend", args)
-	defer raft.DLog(raft.ServerInfo, kv.me, "reply PutAppend", reply)
+	raft.DLog(raft.ServerInfo, kv.me, "GoId:", raft.GoID(), "receives PutAppend", args)
+	defer raft.DLog(raft.ServerInfo, kv.me, "reply PutAppend", args, "with", reply)
+
+	term, isLeader := kv.rf.GetState()
+	reply.Term = term
+	if !isLeader {
+		reply.Err = Err(ErrWrongLeader)
+		return
+	}
 
 	op := Op{}
 	if args.Op == "Put" {
@@ -120,19 +270,52 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 	op.Key = args.Key
 	op.Value = args.Value
+	op.ClerkID = args.ClerkID
+	op.CommandID = args.CommandID
+	op.Term = term
 
-	requestSuccess, requestResult := kv.startOp(op)
-
-	if !requestSuccess {
-		reply.Err = requestResult
-		return
+	resultCh := make(chan result)
+	request := request{
+		op: op,
+		ch: resultCh,
 	}
-	reply.Err = OK
+	kv.requestCh <- request
+
+	result := <-resultCh
+
+	if !result.success {
+		reply.Err = Err(result.val)
+	} else {
+		reply.Err = OK
+	}
 }
 
 func (kv *KVServer) apply(op Op) (success bool, result string) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
+
+	defer func() {
+		if success == false && len(result) == 0 {
+			panic("")
+		}
+	}()
+
+	commandID, ok := kv.clerkMCommandID[op.ClerkID]
+	if !ok || op.CommandID > commandID {
+		raft.Assert(commandID+1 == op.CommandID || !ok, "command out of order clerkID:", op.ClerkID,
+			"last commandID", commandID, "new commandID", op.CommandID)
+		kv.clerkMCommandID[op.ClerkID] = op.CommandID
+	} else {
+		if op.OpType == OpGet {
+			// avoid reading stale data
+			success = false
+			result = ErrReGet
+			raft.DLog(raft.ServerInfo, kv.me, ErrReGet, "op:", op, "clerkID:", op.ClerkID,
+				"last commandID", commandID)
+		} else {
+			success = true
+		}
+		return
+	}
+
 	if op.OpType == OpAppend {
 		_, ok := kv.db[op.Key]
 		if !ok {
@@ -145,67 +328,89 @@ func (kv *KVServer) apply(op Op) (success bool, result string) {
 		raft.Assert(op.OpType == OpGet, "op.OpType must be OpPut OpAppend OpGet.")
 		val, ok := kv.db[op.Key]
 		if !ok {
-			result = string(ErrNoKey)
+			result = ErrNoKey
+			success = false
 			return
+		} else {
+			result = val
 		}
-		result = val
 	}
 	success = true
 	return
 }
 
-func (kv *KVServer) handleCommit() {
+func (kv *KVServer) handleLeaderTransit() {
+	raft.DLog(raft.ServerInfo, kv.me, "handleLeaderTransit", raft.GoID())
+
+	for !kv.killed() {
+		term, isLeader := kv.rf.GetState()
+		kv.cond.L.Lock()
+		termChanged := term != kv.term
+		if !isLeader || termChanged {
+			if kv.requestOp.OpType != OpEmpty && kv.requestOp.Term != term {
+				if kv.requestOp.OpType != OpEmpty {
+					raft.DLog(raft.ServerInfo, kv.me, "kill op:", kv.requestOp)
+					kv.requestSuccess = false
+					kv.requestResult = ErrWrongLeader
+					kv.cond.Signal()
+				}
+			}
+			if termChanged {
+				kv.term = term
+			}
+		}
+		kv.cond.L.Unlock()
+		time.Sleep(raft.HeartBeatMs / 2 * time.Millisecond)
+	}
+}
+
+func (kv *KVServer) handleApply() {
+	raft.DLog(raft.ServerInfo, kv.me, "handleApply()", raft.GoID())
+
 	kill := make(chan bool)
 	go func() {
 		for !kv.killed() {
 			time.Sleep(time.Millisecond * 100)
 		}
 		kill <- true
-	} ()
+	}()
+
 	for {
 		select {
 		case msg := <-kv.applyCh:
-			go func() {
 			committed, ok := msg.Command.(Op)
 			raft.Assert(ok, "command field of msg in applyCh must be type Op.")
 			success, result := kv.apply(committed)
 
-			kv.cond.L.Lock()
-			var op *Op
-			empty := len(kv.requestQueue) == 0
-			if !empty {
-				op = kv.requestQueue[0]
+			var resultLog string
+			if len(result) > 20 {
+				resultLog = result[len(result)-20 : len(result)]
+			} else {
+				resultLog = result
 			}
+			raft.DLog(raft.ServerInfo, kv.me, "apply", committed, "index:", msg.CommandIndex,
+				"result:", resultLog)
+
+			kv.cond.L.Lock()
+			empty := kv.requestOp.OpType == OpEmpty
 			if empty {
 				kv.cond.L.Unlock()
-				return 
-			} else if *op != committed {
-				for i := 1; i < len(kv.requestQueue); i++ {
-					if kv.requestQueue[i] == op {
-						for j := 0; j < i; j++ {
-							kv.requestSuccess = false
-							kv.requestResult = ErrApplyFailed
-							kv.requestOp = kv.requestQueue[j]
-							kv.cond.Broadcast()
-						}
-						kv.requestQueue = kv.requestQueue[i+1:]
-						kv.requestSuccess = success
-						kv.requestResult = result
-						kv.requestOp = op
-						raft.DLog(raft.CondInfo, kv.me, "send broadcast", unsafe.Pointer(kv.requestOp))
-						kv.cond.Broadcast()
-					}
-				}
-			} else {
-				kv.requestQueue = kv.requestQueue[1:]
-				kv.requestSuccess = success
+				continue
+			} else if kv.requestOp == committed {
 				kv.requestResult = result
-				kv.requestOp = op
-				raft.DLog(raft.CondInfo, kv.me, "send broadcast", unsafe.Pointer(kv.requestOp))
-				kv.cond.Broadcast()
+				kv.requestSuccess = success
+				kv.cond.Signal()
+			} else {
+				term, isLeader := kv.rf.GetState()
+				raft.Assert(!isLeader || term != committed.Term,
+					"requestOp", kv.requestOp, "mismatch with committed", committed)
+				if !isLeader {
+					kv.requestSuccess = false
+					kv.requestResult = ErrWrongLeader
+					kv.cond.Signal()
+				}
 			}
 			kv.cond.L.Unlock()
-		} ()
 		case <-kill:
 			return
 		}
@@ -258,11 +463,17 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
-	mu := sync.Mutex{}
+	mu := raft.DLock{}
 	kv.cond = sync.NewCond(&mu)
 	kv.db = make(map[string]string)
+	kv.clerkMCommandID = make(map[int]int)
 
-	go kv.handleCommit()
+	kv.requestCh = make(chan request)
+	kv.requestApplyCh = make(chan bool)
+
+	go kv.handleApply()
+	go kv.handleLeaderTransit()
+	go kv.handleRequest()
 
 	return kv
 }

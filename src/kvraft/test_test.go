@@ -1,6 +1,9 @@
 package kvraft
 
-import "6.824/porcupine"
+import (
+	"6.824/porcupine"
+	"6.824/raft"
+)
 import "6.824/models"
 import "testing"
 import "strconv"
@@ -432,6 +435,7 @@ func TestSpeed3A(t *testing.T) {
 }
 
 func TestConcurrent3A(t *testing.T) {
+	raft.DLog(raft.TestInfo, raft.GoID())
 	// Test: many clients (3A) ...
 	GenericTest(t, "3A", 5, 5, false, false, false, -1, false)
 }
@@ -591,12 +595,10 @@ func TestPersistPartitionUnreliableLinearizable3A(t *testing.T) {
 	GenericTest(t, "3A", 15, 7, true, true, true, -1, true)
 }
 
-//
 // if one server falls behind, then rejoins, does it
 // recover by using the InstallSnapshot RPC?
 // also checks that majority discards committed log entries
 // even if minority doesn't respond.
-//
 func TestSnapshotRPC3B(t *testing.T) {
 	const nservers = 3
 	maxraftstate := 1000
