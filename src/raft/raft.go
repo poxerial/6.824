@@ -31,18 +31,16 @@ import (
 )
 
 const (
-	voteSuccessRatio    = 0.5
-	EntryCommitRatio    = 0.5
-	maxTickerMs         = 130
-	tickerSleepMs       = 10
-	maxVoteMs           = 100
-	minVoteMs           = 55
-	voteCallSleepMs     = 5
-	heartBeatMs         = 100
-	RPCTimeOutMs        = 50
-	applySleepMs        = 20
-	maxAppendEntriesLen = 30
-	RPCMAXRetryTimes    = 3
+	voteSuccessRatio = 0.5
+	EntryCommitRatio = 0.5
+	maxTickerMs      = 130
+	tickerSleepMs    = 10
+	maxVoteMs        = 100
+	minVoteMs        = 55
+	voteCallSleepMs  = 5
+	HeartBeatMs      = 100
+	RPCTimeOutMs     = 50
+	RPCMAXRetryTimes = 3
 )
 
 const (
@@ -370,14 +368,15 @@ type RequestVoteReply struct {
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	psChanged := false
 	defer func() {
 		if psChanged {
 			rf.persist()
 		}
 	}()
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 
 	if args.Term > rf.ps.currentTerm {
 		if rf.status == Leader {
@@ -467,7 +466,7 @@ func (rf *Raft) setApply() {
 	deadCh := make(chan bool, 1)
 	go func() {
 		for !rf.killed() {
-			time.Sleep(heartBeatMs * time.Millisecond)
+			time.Sleep(HeartBeatMs * time.Millisecond)
 		}
 		deadCh <- true
 	}()
@@ -776,7 +775,7 @@ func (rf *Raft) transitToFollower(term int) {
 
 	rf.persist()
 
-	DLog(rf.me, "transit to follower with term", term)
+	DLog(LeaderInfo, rf.me, "transit to follower with term", term)
 }
 
 // need additional lock
@@ -987,11 +986,11 @@ func (rf *Raft) setHeartbeat(i int, leaderID int) {
 				return
 			}
 
-			if time.Since(lastConnectTime).Milliseconds() > heartBeatMs {
+			if time.Since(lastConnectTime).Milliseconds() > HeartBeatMs {
 				rf.sendAppendEntries(i, leaderID, false)
 			}
 
-			sleepTimeMs := heartBeatMs - time.Since(lastConnectTime).Milliseconds()
+			sleepTimeMs := HeartBeatMs - time.Since(lastConnectTime).Milliseconds()
 
 			if sleepTimeMs > 0 {
 				time.Sleep(time.Duration(sleepTimeMs) * time.Millisecond)

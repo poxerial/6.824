@@ -15,6 +15,7 @@ const Debug = true
 
 const (
 	RPCInfo = iota
+	Fatal
 	LeaderInfo
 	CandidateInfo
 	FollowerInfo
@@ -24,6 +25,7 @@ const (
 	PersistInfo
 	SnapshotInfo
 	ServerInfo
+	ClientInfo
 	CondInfo
 	TestInfo
 )
@@ -50,20 +52,22 @@ func init() {
 
 		flags := log.Lmicroseconds
 
-		loggers[RPCInfo] = log.New(tmpIO, "[RPCInfo]", flags)
+		//loggers[RPCInfo] = log.New(tmpIO, "[RPCInfo]", flags)
 		loggers[LeaderInfo] = log.New(tmpIO, "[LeaderInfo]", flags)
-		loggers[CandidateInfo] = log.New(tmpIO, "[CandidateInfo]", flags)
+		loggers[Fatal] = log.New(tmpIO, "Fatal:", log.LstdFlags)
+		//loggers[CandidateInfo] = log.New(tmpIO, "[CandidateInfo]", flags)
 		//loggers[TickerInfo] = log.New(tmpIO, "[TickerInfo]", flags)
-		loggers[FollowerInfo] = log.New(tmpIO, "[FollowerInfo]", flags)
+		//loggers[FollowerInfo] = log.New(tmpIO, "[FollowerInfo]", flags)
 		loggers[UserInfo] = log.New(tmpIO, "[UserInfo]", flags)
-		loggers[ApplyInfo] = log.New(tmpIO, "[ApplyInfo]", flags)
-		loggers[PersistInfo] = log.New(tmpIO, "[PersistInfo]", flags)
-		loggers[SnapshotInfo] = log.New(tmpIO, "[SnapshotInfo]", flags)
+		//loggers[ApplyInfo] = log.New(tmpIO, "[ApplyInfo]", flags)
+		//loggers[PersistInfo] = log.New(tmpIO, "[PersistInfo]", flags)
+		//loggers[SnapshotInfo] = log.New(tmpIO, "[SnapshotInfo]", flags)
 		loggers[ServerInfo] = log.New(tmpIO, "[ServerInfo]", flags)
 		loggers[CondInfo] = log.New(tmpIO, "[CondInfo]", flags)
 		loggers[TestInfo] = log.New(tmpIO, "[TestInfo]", flags)
+		loggers[ClientInfo] = log.New(tmpIO, "[ClientInfo]", flags)
 
-		runtime.SetFinalizer(loggers[0], func(logger *log.Logger) {
+		runtime.SetFinalizer(loggers[Fatal], func(logger *log.Logger) {
 			err := tmpIO.Close()
 			if err != nil {
 				log.Fatalf("Can't close file.")
@@ -139,8 +143,13 @@ func (l *DLock) RUnlock() {
 	l.lock.RUnlock()
 }
 
-func Assert(expr bool, v interface{}) {
+func Assert(expr bool, v ...interface{}) {
 	if !expr {
-		panic(v)
+		logger, enabled := loggers[Fatal]
+		if enabled {
+			logger.Fatal(v...)
+		} else {
+			log.Fatal(v...)
+		}
 	}
 }
