@@ -11,7 +11,7 @@ import (
 )
 
 // Debugging
-const Debug = true
+const Debug = false 
 
 const (
 	RPCInfo = iota
@@ -57,7 +57,7 @@ func init() {
 		loggers[Fatal] = log.New(tmpIO, "Fatal:", log.LstdFlags)
 		//loggers[CandidateInfo] = log.New(tmpIO, "[CandidateInfo]", flags)
 		//loggers[TickerInfo] = log.New(tmpIO, "[TickerInfo]", flags)
-		//loggers[FollowerInfo] = log.New(tmpIO, "[FollowerInfo]", flags)
+		loggers[FollowerInfo] = log.New(tmpIO, "[FollowerInfo]", flags)
 		loggers[UserInfo] = log.New(tmpIO, "[UserInfo]", flags)
 		//loggers[ApplyInfo] = log.New(tmpIO, "[ApplyInfo]", flags)
 		//loggers[PersistInfo] = log.New(tmpIO, "[PersistInfo]", flags)

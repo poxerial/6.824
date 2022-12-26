@@ -268,11 +268,12 @@ type InstallSnapshotReply struct {
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.applyMu.Lock()
 	rf.mu.Lock()
+	defer rf.applyMu.Unlock()
+	defer rf.mu.Unlock()
+
 	rf.lastTime = time.Now()
 	if args.Term < rf.ps.currentTerm {
 		reply.Term = rf.ps.currentTerm
-		rf.applyMu.Unlock()
-		rf.mu.Unlock()
 		return
 	} else if args.Term > rf.ps.currentTerm {
 		if rf.status == Leader {
@@ -286,8 +287,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	reply.Term = rf.ps.currentTerm
 
 	if args.LastIndex <= rf.ps.lastIndex {
-		rf.applyMu.Unlock()
-		rf.mu.Unlock()
 		return
 	}
 
@@ -305,11 +304,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	rf.persist(args.Data)
 
-	rf.applyMu.Unlock()
-	rf.mu.Unlock()
-
 	if args.Data == nil {
-
 		return
 	}
 
@@ -829,7 +824,7 @@ func (rf *Raft) updateEntriesSend(server int, index int) {
 	if index <= rf.ps.lastIndex {
 		index = rf.ps.lastIndex + 1
 	}
-	for ; index < rf.leaderStat.nextIndex[server]; index++ {
+	for ; index <= rf.leaderStat.matchIndex[server]; index++ {
 		rf.leaderStat.entriesSend[index-rf.ps.lastIndex-1]++
 
 		if rf.leaderStat.entriesSend[index-rf.ps.lastIndex-1] == len(rf.peers) {
@@ -895,12 +890,22 @@ func (rf *Raft) sendAppendEntries(server int, leaderID int, notHeartBeat bool) {
 		if reply.Success {
 			if toSend {
 				// not heart beat
-				rf.leaderStat.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
-				index := rf.leaderStat.matchIndex[server] + 1
-				rf.leaderStat.matchIndex[server] = rf.leaderStat.nextIndex[server] - 1
-				rf.updateEntriesSend(server, index)
-				rf.checkCommit()
-				DLog(LeaderInfo, leaderID, "success send AppendEntries to", server)
+				nextIndex = args.PrevLogIndex + len(args.Entries) + 1
+				if nextIndex > rf.leaderStat.nextIndex[server] {
+					rf.leaderStat.nextIndex[server] = nextIndex
+				}
+
+				matchIndex := nextIndex - 1;
+				if matchIndex > rf.leaderStat.matchIndex[server] {
+					index := rf.leaderStat.matchIndex[server] + 1
+					rf.leaderStat.matchIndex[server] = matchIndex
+					rf.updateEntriesSend(server, index)
+					rf.checkCommit()
+				}
+
+				DLog(LeaderInfo, leaderID, "success send AppendEntries to", server, 
+				"nextIndex:", rf.leaderStat.nextIndex[server],
+				"matchIndex:", rf.leaderStat.matchIndex[server])
 			} else {
 				DLog(LeaderInfo, leaderID, "success send heartbeat to", server)
 			}
