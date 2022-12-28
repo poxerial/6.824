@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -54,24 +55,27 @@ type KVServer struct {
 	dead    int32 // set by Kill()
 
 	maxraftstate int // snapshot if log grows this big
+	persister    *raft.Persister
 
 	// Your definitions here.
 
 	// initialized with sync.Mutex
-	// also used to ensure the sequential consistency
-	// between requestQueue and applyCh
+	// used to synchronize request from Clerk and message from applyCh
 	cond *sync.Cond
-	// if set to true, handleLeaderTransit() is trying to kill all waiting request
-	leaderTransit bool
-	term          int
-	requestOp     Op
+
+	// term of most recent message from rf
+	term      int
+	requestOp Op
+
 	// if false, requestResult is error message instead of result
 	requestSuccess bool
 	requestResult  string
 	requestCh      chan request
 	requestApplyCh chan bool
 
-	db              map[string]string
+	// database
+	db map[string]string
+	// trace the increment of CommandID of different Clerks
 	clerkMCommandID map[int]int
 }
 
@@ -143,77 +147,6 @@ func (kv *KVServer) handleRequest() {
 		}
 	}
 }
-
-//func (kv *KVServer) startOp(op Op) (requestSuccess bool, requestResult string) {
-//	if op.CommandID == -1 {
-//		// ck.findOutLeader()
-//		return
-//	}
-//	kv.cond.L.Lock()
-//	for kv.requestOp.OpType != OpEmpty || kv.leaderTransit {
-//		raft.DLog(raft.CondInfo, kv.me, op, "start to wait.")
-//		kv.cond.Wait()
-//	}
-//	raft.DLog(raft.CondInfo, kv.me, op, "awakes.")
-
-//term, isLeader := kv.rf.GetState()
-//termChanged := term != kv.term
-//if termChanged {
-//	for termChanged {
-//		kv.cond.Wait()
-//		term, _ = kv.rf.GetState()
-//		termChanged = term != kv.term
-//	}
-//}
-
-//finishCh := make(chan bool, 1)
-//go func() {
-//	kv.requestOp = op
-//	raft.DLog(raft.ServerInfo, kv.me, op, "waiting for committed.")
-//	kv.cond.Wait()
-//	requestSuccess = kv.requestSuccess
-//	requestResult = kv.requestResult
-//	raft.DLog(raft.ServerInfo, kv.me, "requestOp became empty from", op)
-//	kv.requestOp = Op{}
-//	kv.cond.L.Unlock()
-//	kv.cond.Broadcast()
-//	finishCh <- true
-//}()
-
-//_, term, isLeader = kv.rf.Start(op)
-
-//if !isLeader || term != kv.term {
-//	requestSuccess = false
-//	requestResult = ErrWrongLeader
-//	kv.requestOp = Op{}
-//	kv.cond.L.Unlock()
-//	kv.cond.Broadcast()
-//	return
-//}
-
-//timeOutCh := make(chan bool, 1)
-//go func() {
-//	time.Sleep(OpTimeOutMs * time.Millisecond)
-//	timeOutCh <- true
-//}()
-
-//	select {
-//	case <-finishCh:
-//		return
-//	case <-timeOutCh:
-//		_, isLeader := kv.rf.GetState()
-//		if isLeader {
-//			raft.DLog(raft.ServerInfo, op, "timed out.")
-//			return false, ErrTimeOut
-//		} else {
-//			kv.cond.L.Lock()
-//			kv.requestOp = Op{}
-//			kv.cond.L.Unlock()
-//			kv.cond.Broadcast()
-//			return false, ErrWrongLeader
-//		}
-//	}
-//}
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
@@ -339,6 +272,34 @@ func (kv *KVServer) apply(op Op) (success bool, result string) {
 	return
 }
 
+func (kv *KVServer) checkSnapshot(lastCommandIndex int) {
+	if kv.persister.RaftStateSize() >= kv.maxraftstate && kv.maxraftstate != -1 {
+		writer := new(bytes.Buffer)
+		encoder := labgob.NewEncoder(writer)
+
+		err1 := encoder.Encode(kv.db)
+		err2 := encoder.Encode(kv.clerkMCommandID)
+
+		raft.Assert(err1 == nil && err2 == nil, "Failed to encode snapshot:", err1, err2)
+
+		data := writer.Bytes()
+		kv.rf.Snapshot(lastCommandIndex, data)
+	}
+}
+
+func (kv *KVServer) readSnapshot(data []byte) {
+	writer := bytes.NewBuffer(data)
+	decoder := labgob.NewDecoder(writer)
+
+	//db := make(map[string]string)
+	//clerkMCommandID := make(map[int]int)
+
+	err1 := decoder.Decode(&kv.db)
+	err2 := decoder.Decode(&kv.clerkMCommandID)
+	raft.Assert(err1 == nil && err2 == nil, "Failed to decode snapshot:", err1, err2)
+
+}
+
 func (kv *KVServer) handleLeaderTransit() {
 	raft.DLog(raft.ServerInfo, kv.me, "handleLeaderTransit", raft.GoID())
 
@@ -378,43 +339,62 @@ func (kv *KVServer) handleApply() {
 	for {
 		select {
 		case msg := <-kv.applyCh:
-			committed, ok := msg.Command.(Op)
-			raft.Assert(ok, "command field of msg in applyCh must be type Op.")
-			success, result := kv.apply(committed)
-
-			var resultLog string
-			if len(result) > 20 {
-				resultLog = result[len(result)-20 : len(result)]
-			} else {
-				resultLog = result
+			if msg.CommandValid {
+				kv.applyCommandMessage(msg)
+			} else if msg.SnapshotValid {
+				kv.applyInstallSnapshot(msg)
 			}
-			raft.DLog(raft.ServerInfo, kv.me, "apply", committed, "index:", msg.CommandIndex,
-				"result:", resultLog)
-
-			kv.cond.L.Lock()
-			empty := kv.requestOp.OpType == OpEmpty
-			if empty {
-				kv.cond.L.Unlock()
-				continue
-			} else if kv.requestOp == committed {
-				kv.requestResult = result
-				kv.requestSuccess = success
-				kv.cond.Signal()
-			} else {
-				term, isLeader := kv.rf.GetState()
-				raft.Assert(!isLeader || term != committed.Term,
-					"requestOp", kv.requestOp, "mismatch with committed", committed)
-				if !isLeader {
-					kv.requestSuccess = false
-					kv.requestResult = ErrWrongLeader
-					kv.cond.Signal()
-				}
-			}
-			kv.cond.L.Unlock()
 		case <-kill:
 			return
 		}
 	}
+}
+
+func (kv *KVServer) applyCommandMessage(msg raft.ApplyMsg) {
+	raft.Assert(msg.CommandValid)
+
+	committed, ok := msg.Command.(Op)
+	raft.Assert(ok, "command field of msg in applyCh must be type Op.")
+	success, result := kv.apply(committed)
+
+	kv.checkSnapshot(msg.CommandIndex)
+
+	var resultLog string
+	if len(result) > 20 {
+		resultLog = result[len(result)-20 : len(result)]
+	} else {
+		resultLog = result
+	}
+	raft.DLog(raft.ServerInfo, kv.me, "apply", committed, "index:", msg.CommandIndex,
+		"result:", resultLog)
+
+	kv.cond.L.Lock()
+	empty := kv.requestOp.OpType == OpEmpty
+	if empty {
+		kv.cond.L.Unlock()
+		return
+	} else if kv.requestOp == committed {
+		kv.requestResult = result
+		kv.requestSuccess = success
+		kv.cond.Signal()
+	} else {
+		term, isLeader := kv.rf.GetState()
+		raft.Assert(!isLeader || term != committed.Term,
+			"requestOp", kv.requestOp, "mismatch with committed", committed)
+		if !isLeader {
+			kv.requestSuccess = false
+			kv.requestResult = ErrWrongLeader
+			kv.cond.Signal()
+		}
+	}
+	kv.cond.L.Unlock()
+}
+
+func (kv *KVServer) applyInstallSnapshot(msg raft.ApplyMsg) {
+	raft.Assert(msg.SnapshotValid)
+
+	kv.readSnapshot(msg.Snapshot)
+	raft.DLog(raft.ServerInfo, kv.me, "apply snapshot at index", msg.SnapshotIndex)
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -456,17 +436,22 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
+	kv.persister = persister
 
 	// You may need initialization code here.
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
-	// You may need initialization code here.
 	mu := raft.DLock{}
 	kv.cond = sync.NewCond(&mu)
 	kv.db = make(map[string]string)
 	kv.clerkMCommandID = make(map[int]int)
+
+	snapshot := persister.ReadSnapshot()
+	if len(snapshot) != 0 {
+		kv.readSnapshot(snapshot)
+	}
 
 	kv.requestCh = make(chan request)
 	kv.requestApplyCh = make(chan bool)
