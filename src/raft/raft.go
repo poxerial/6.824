@@ -319,27 +319,25 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.msgCh <- msg
 }
 
+// need additional lock
 func (rf *Raft) sendInstallSnapshot(server int) {
-	rf.mu.RLock()
 	args := InstallSnapshotArgs{}
 	args.Term = rf.ps.currentTerm
 	args.LastTerm = rf.ps.lastTerm
 	args.LastIndex = rf.ps.lastIndex
-	rf.mu.RUnlock()
 
 	// rf.persister.snapshot may be written in Raft.persist()
-	rf.persister.mu.Lock()
 	args.Data = rf.persister.snapshot
-	rf.persister.mu.Unlock()
 
 	reply := InstallSnapshotReply{}
-	rf.sendRPC(server, "Raft.InstallSnapshot", &args, &reply)
 
+	rf.mu.Unlock()
+	rf.sendRPC(server, "Raft.InstallSnapshot", &args, &reply)
 	rf.mu.Lock()
+
 	if reply.Term > rf.ps.currentTerm {
 		rf.transitToFollower(reply.Term)
 	}
-	rf.mu.Unlock()
 }
 
 // example RequestVote RPC arguments structure.
@@ -857,9 +855,9 @@ func (rf *Raft) sendAppendEntries(server int, leaderID int, notHeartBeat bool) {
 	} else {
 		rf.leaderStat.nextIndex[server] = rf.ps.lastIndex + 1
 		rf.leaderStat.matchIndex[server] = rf.ps.lastIndex
-		rf.mu.Unlock()
 		DLog(SnapshotInfo, "send install snapshot before append entries")
 		rf.sendInstallSnapshot(server)
+		rf.mu.Unlock()
 		rf.sendAppendEntries(server, leaderID, true)
 		return
 	}
@@ -903,9 +901,9 @@ func (rf *Raft) sendAppendEntries(server int, leaderID int, notHeartBeat bool) {
 					rf.checkCommit()
 				}
 
-				DLog(LeaderInfo, leaderID, "success send AppendEntries to", server, 
-				"nextIndex:", rf.leaderStat.nextIndex[server],
-				"matchIndex:", rf.leaderStat.matchIndex[server])
+				DLog(LeaderInfo, leaderID, "success send AppendEntries to", server,
+					"nextIndex:", rf.leaderStat.nextIndex[server],
+					"matchIndex:", rf.leaderStat.matchIndex[server])
 			} else {
 				DLog(LeaderInfo, leaderID, "success send heartbeat to", server)
 			}
@@ -929,12 +927,14 @@ func (rf *Raft) sendAppendEntries(server int, leaderID int, notHeartBeat bool) {
 						rf.mu.Unlock()
 						return
 					}
-					rf.mu.Unlock()
 
 					DLog(SnapshotInfo, "send install snapshot because reply.LastIndex == -1")
 					rf.sendInstallSnapshot(server)
 					rf.leaderStat.nextIndex[server] = lastIndex + 1
 					rf.leaderStat.matchIndex[server] = lastIndex
+
+					rf.mu.Unlock()
+
 					rf.sendAppendEntries(server, leaderID, true)
 					return
 				} else {
@@ -942,11 +942,11 @@ func (rf *Raft) sendAppendEntries(server int, leaderID int, notHeartBeat bool) {
 						rf.leaderStat.nextIndex[server]--
 					}
 					if rf.leaderStat.nextIndex[server]-1-rf.ps.lastIndex+1 < 0 {
-						rf.mu.Unlock()
 						DLog(SnapshotInfo, "entries out of leader's rf.ps.logEntries")
 						rf.sendInstallSnapshot(server)
 						rf.leaderStat.nextIndex[server] = rf.ps.lastIndex + 1
 						rf.leaderStat.matchIndex[server] = rf.ps.lastIndex
+						rf.mu.Unlock()
 						rf.sendAppendEntries(server, leaderID, true)
 						return
 					}
