@@ -11,7 +11,7 @@ import (
 )
 
 // Debugging
-const Debug = false 
+const Debug = false
 
 const (
 	RPCInfo = iota
@@ -30,14 +30,6 @@ const (
 	TestInfo
 )
 
-//	var loggersList = []string{
-//		"RPCInfo",
-//		"LeaderInfo",
-//		"CandidateInfo",
-//		"FollowerInfo",
-//		"TickerInfo",
-//		"UserInfo",
-//	}
 var loggers map[int]*log.Logger
 
 // initialize logger
@@ -57,13 +49,13 @@ func init() {
 		loggers[Fatal] = log.New(tmpIO, "Fatal:", log.LstdFlags)
 		//loggers[CandidateInfo] = log.New(tmpIO, "[CandidateInfo]", flags)
 		//loggers[TickerInfo] = log.New(tmpIO, "[TickerInfo]", flags)
-		loggers[FollowerInfo] = log.New(tmpIO, "[FollowerInfo]", flags)
+		//loggers[FollowerInfo] = log.New(tmpIO, "[FollowerInfo]", flags)
 		loggers[UserInfo] = log.New(tmpIO, "[UserInfo]", flags)
 		//loggers[ApplyInfo] = log.New(tmpIO, "[ApplyInfo]", flags)
 		//loggers[PersistInfo] = log.New(tmpIO, "[PersistInfo]", flags)
-		//loggers[SnapshotInfo] = log.New(tmpIO, "[SnapshotInfo]", flags)
+		loggers[SnapshotInfo] = log.New(tmpIO, "[SnapshotInfo]", flags)
 		loggers[ServerInfo] = log.New(tmpIO, "[ServerInfo]", flags)
-		loggers[CondInfo] = log.New(tmpIO, "[CondInfo]", flags)
+		//loggers[CondInfo] = log.New(tmpIO, "[CondInfo]", flags)
 		loggers[TestInfo] = log.New(tmpIO, "[TestInfo]", flags)
 		loggers[ClientInfo] = log.New(tmpIO, "[ClientInfo]", flags)
 
@@ -77,9 +69,11 @@ func init() {
 }
 
 func DLog(info int, content ...interface{}) {
-	logger, inList := loggers[info]
-	if Debug && inList {
-		logger.Println(content...)
+	if Debug {
+		logger, inList := loggers[info]
+		if inList {
+			logger.Println(content...)
+		}
 	}
 }
 
