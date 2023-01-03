@@ -48,7 +48,7 @@ type Op struct {
 }
 
 type KVServer struct {
-	mu      raft.DLock
+	mu      sync.Mutex
 	me      int
 	rf      *raft.Raft
 	applyCh chan raft.ApplyMsg
@@ -443,7 +443,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
-	mu := raft.DLock{}
+	mu := sync.Mutex{}
 	kv.cond = sync.NewCond(&mu)
 	kv.db = make(map[string]string)
 	kv.clerkMCommandID = make(map[int]int)

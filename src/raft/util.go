@@ -11,7 +11,7 @@ import (
 )
 
 // Debugging
-const Debug = false
+const Debug = true
 
 const (
 	RPCInfo = iota
@@ -27,6 +27,7 @@ const (
 	ServerInfo
 	ClientInfo
 	CondInfo
+	CtrlInfo
 	TestInfo
 )
 
@@ -58,6 +59,7 @@ func init() {
 		//loggers[CondInfo] = log.New(tmpIO, "[CondInfo]", flags)
 		loggers[TestInfo] = log.New(tmpIO, "[TestInfo]", flags)
 		loggers[ClientInfo] = log.New(tmpIO, "[ClientInfo]", flags)
+		loggers[CtrlInfo] = log.New(tmpIO, "[CtrlInfo]", flags)
 
 		runtime.SetFinalizer(loggers[Fatal], func(logger *log.Logger) {
 			err := tmpIO.Close()

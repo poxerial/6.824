@@ -164,7 +164,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	}
 }
 
-// need addtional lock
+// need additional lock
 func (ck *Clerk) findOutLeader() {
 	raft.DLog(raft.ClientInfo, "Clerk", ck.ID, "GoID", raft.GoID(), "starts to find leader.")
 
