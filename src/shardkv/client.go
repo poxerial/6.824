@@ -11,6 +11,7 @@ package shardkv
 import (
 	"6.824/labrpc"
 	"sync"
+	"sync/atomic"
 )
 import "crypto/rand"
 import "math/big"
@@ -36,7 +37,7 @@ func nrand() int64 {
 	return x
 }
 
-var clerkNum = 0
+var clerkNum atomic.Int32
 
 type Clerk struct {
 	sm       *shardctrler.Clerk
@@ -44,7 +45,7 @@ type Clerk struct {
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
 	ID        int
-	commandID []int
+	commandID map[int]int
 	mu        sync.Mutex
 }
 
@@ -60,9 +61,12 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.sm = shardctrler.MakeClerk(ctrlers)
 	ck.make_end = make_end
 	// You'll have to add code here.
-	ck.ID = clerkNum
-	clerkNum++
-	ck.commandID = make([]int, shardctrler.NShards)
+	ck.ID = int(clerkNum.Load())
+	clerkNum.Add(1)
+	ck.commandID = make(map[int]int)
+	for i := 0; i < 10; i++ {
+		ck.commandID[i] = 0
+	}
 	return ck
 }
 
@@ -80,7 +84,8 @@ func (ck *Clerk) Get(key string) string {
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
-		args.CommandID = ck.commandID[gid]
+		commandID := ck.commandID[shard]
+		args.CommandID = commandID
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
@@ -88,7 +93,7 @@ func (ck *Clerk) Get(key string) string {
 				var reply GetReply
 				ok := srv.Call("ShardKV.Get", &args, &reply)
 				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
-					ck.commandID[gid]++
+					ck.commandID[shard]++
 					return reply.Value
 				}
 				if ok && (reply.Err == ErrWrongGroup) {
@@ -120,14 +125,19 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
-		args.CommandID = ck.commandID[gid]
+		commandID, ok := ck.commandID[shard]
+		if !ok {
+			ck.commandID[gid] = 0
+			commandID = 0
+		}
+		args.CommandID = commandID
 		if servers, ok := ck.config.Groups[gid]; ok {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply PutAppendReply
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
 				if ok && reply.Err == OK {
-					ck.commandID[gid]++
+					ck.commandID[shard]++
 					return
 				}
 				if ok && reply.Err == ErrWrongGroup {
